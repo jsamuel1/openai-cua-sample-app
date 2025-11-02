@@ -113,7 +113,7 @@ python cli.py --show --computer docker
 
 | Computer | Option | Type | Description | Requirements |
 | -------- | ------ | ---- | ----------- | ------------ |
-| `tbd`    | tbd    | tbd  | tbd         | tbd          |
+| `AgentCoreBrowser` | agentcore-browser | `browser` | AWS Bedrock AgentCore managed browser via CDP | AWS Account with Bedrock AgentCore access, AWS credentials configured (via environment variables or `~/.aws/credentials`) |
 
 > [!NOTE]  
 > If you've implemented a new computer, please add it to the "Contributed Computers" section of the README.md file. Clearly indicate any auth / signup requirements. See the [Contributing](#contributing) section for more details.
@@ -149,6 +149,57 @@ docker run --rm -it --name cua-sample-app -p 5900:5900 --dns=1.1.1.3 -e DISPLAY=
 
 This repository contains example implementations of third-party hosted environments.
 To use these, you will need to set up an account with the service by following the links aboveand add your API key to the `.env` file.
+
+### Amazon Bedrock AgentCore Browser Setup
+
+To use the `AgentCoreBrowser`, you need to configure AWS credentials with access to Amazon Bedrock AgentCore services.
+
+#### Prerequisites
+
+1. **AWS Account**: You need an active AWS account with access to Amazon Bedrock AgentCore services
+2. **AWS Credentials**: Configure your AWS credentials using one of these methods:
+
+**Option 1: Environment Variables**
+
+Add to your `.env` file:
+```
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+AWS_SESSION_TOKEN=your_session_token  # Optional, if using temporary credentials
+```
+
+**Option 2: AWS CLI Configuration**
+
+Configure credentials using AWS CLI:
+```shell
+aws configure
+```
+
+This will create credentials in `~/.aws/credentials` that will be automatically used.
+
+#### Usage
+
+Run the sample app with the AgentCore Browser:
+
+```shell
+python cli.py --show --computer agentcore-browser
+```
+
+You can also customize the browser configuration:
+- Default region: `us-east-1`
+- Default viewport: 1024x768
+- Virtual mouse cursor: enabled by default
+
+#### Features
+
+- **Fully Managed**: AWS handles browser infrastructure, scaling, and maintenance
+- **CDP Connection**: Uses Chrome DevTools Protocol for low-level browser control
+- **Virtual Mouse**: Visual cursor indicator for better debugging
+- **Secure**: AWS-managed authentication and encrypted connections
+- **Scalable**: Automatically handles resource allocation and cleanup
+
+For more information, visit the [Amazon Bedrock AgentCore documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser.html).
+
 
 ## Function Calling
 
