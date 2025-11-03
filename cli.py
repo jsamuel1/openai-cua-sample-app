@@ -44,17 +44,60 @@ def main():
         help="Start the browsing session with a specific URL (only for browser environments).",
         default="https://bing.com",
     )
+    
+    # AgentCore Browser specific arguments
+    # Note: Parameter names match AgentCoreBrowser.__init__ for easy passing
+    parser.add_argument(
+        "--region",
+        type=str,
+        help="AWS region for AgentCore Browser (default: us-east-1). Only used with agentcore-browser.",
+        default="us-east-1",
+        dest="agentcore_region",
+    )
+    parser.add_argument(
+        "--recording-s3-bucket",
+        type=str,
+        help="S3 bucket name for AgentCore Browser session recordings. Only used with agentcore-browser.",
+        default=None,
+        dest="recording_s3_bucket",
+    )
+    parser.add_argument(
+        "--recording-s3-prefix",
+        type=str,
+        help="S3 prefix for AgentCore Browser recordings (default: browser-recordings). Only used with agentcore-browser.",
+        default="browser-recordings",
+        dest="recording_s3_prefix",
+    )
+    parser.add_argument(
+        "--no-browser-signing",
+        action="store_true",
+        help="Disable Web Bot Auth signing (enabled by default to reduce CAPTCHAs). Only used with agentcore-browser.",
+        dest="no_browser_signing",
+    )
+    
     args = parser.parse_args()
     ComputerClass = computers_config[args.computer]
 
-    with ComputerClass() as computer:
+    # Prepare computer-specific kwargs
+    computer_kwargs = {}
+    
+    if args.computer == "agentcore-browser":
+        # Parameter names match AgentCoreBrowser.__init__ for direct passing
+        computer_kwargs = {
+            "region": args.agentcore_region,
+            "no_browser_signing": args.no_browser_signing,
+            "recording_s3_bucket": args.recording_s3_bucket,
+            "recording_s3_prefix": args.recording_s3_prefix,
+        }
+
+    with ComputerClass(**computer_kwargs) as computer:
         agent = Agent(
             computer=computer,
             acknowledge_safety_check_callback=acknowledge_safety_check_callback,
         )
         items = []
 
-        if args.computer in ["browserbase", "local-playwright"]:
+        if args.computer in ["browserbase", "local-playwright", "agentcore-browser"]:
             if not args.start_url.startswith("http"):
                 args.start_url = "https://" + args.start_url
             agent.computer.goto(args.start_url)

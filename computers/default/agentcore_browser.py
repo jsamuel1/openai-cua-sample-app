@@ -35,15 +35,17 @@ class AgentCoreBrowser(BasePlaywrightComputer):
     or via AWS CLI configuration (~/.aws/credentials).
     
     For session recording, you need:
-    1. An IAM execution role with S3 write permissions
-    2. An S3 bucket to store recordings
-    3. Proper trust policy allowing bedrock-agentcore.amazonaws.com to assume the role
+    1. An S3 bucket to store recordings
+    2. (Optional) An IAM execution role - will be auto-created if not provided
     
     For Web Bot Auth (reduces CAPTCHAs):
     1. Enable browser_signing when creating a custom browser
-    2. Requires execution_role_arn parameter
+    2. (Optional) execution_role_arn - will be auto-created if not provided
     3. Works with Cloudflare, HUMAN Security, and Akamai Technologies WAFs
     4. Domains must allow verified bots in their WAF configuration
+    
+    Note: IAM execution roles are automatically created with deterministic names
+    and reused across runs when using the same configuration.
     """
 
     def get_dimensions(self):
@@ -59,7 +61,7 @@ class AgentCoreBrowser(BasePlaywrightComputer):
         execution_role_arn: str = None,
         recording_s3_bucket: str = None,
         recording_s3_prefix: str = "browser-recordings",
-        browser_signing: bool = False,
+        no_browser_signing: bool = False,
         reuse_browser: bool = True,
     ):
         """
@@ -71,10 +73,10 @@ class AgentCoreBrowser(BasePlaywrightComputer):
             region (str): The AWS region for the AgentCore Browser service. Default is "us-east-1".
             virtual_mouse (bool): Whether to enable the virtual mouse cursor. Default is True.
             browser_identifier (str): Optional browser identifier to reuse an existing browser. If not provided, uses the default AgentCore browser.
-            execution_role_arn (str): IAM role ARN for browser execution. Required for recording and browser_signing. Example: "arn:aws:iam::123456789012:role/AgentCoreBrowserRole"
-            recording_s3_bucket (str): S3 bucket name for session recordings. Enables recording when provided with execution_role_arn.
+            execution_role_arn (str): Optional IAM role ARN for browser execution. If not provided and recording/signing is enabled, a role will be auto-created. Example: "arn:aws:iam::123456789012:role/AgentCoreBrowserRole"
+            recording_s3_bucket (str): S3 bucket name for session recordings. Enables recording when provided.
             recording_s3_prefix (str): S3 prefix for recordings. Default is "browser-recordings".
-            browser_signing (bool): Enable Web Bot Auth to reduce CAPTCHAs using cryptographic signatures (preview). Requires execution_role_arn. Default is False.
+            no_browser_signing (bool): Disable Web Bot Auth signing (enabled by default to reduce CAPTCHAs). Default is False.
             reuse_browser (bool): Whether to reuse existing browsers with matching configuration. Default is True.
         """
         super().__init__()
@@ -86,13 +88,14 @@ class AgentCoreBrowser(BasePlaywrightComputer):
         self.reuse_browser = reuse_browser
         
         # Recording Configuration
-        self.execution_role_arn = execution_role_arn
+        # Check environment variable if execution_role_arn not provided
+        self.execution_role_arn = execution_role_arn or os.getenv("AGENTCORE_BROWSER_EXECUTIONROLE_ARN")
         self.recording_s3_bucket = recording_s3_bucket
         self.recording_s3_prefix = recording_s3_prefix
-        self.enable_recording = bool(recording_s3_bucket and execution_role_arn)
+        self.enable_recording = bool(recording_s3_bucket)  # Role will be auto-created if needed
         
         # Web Bot Auth Configuration
-        self.browser_signing = browser_signing
+        self.browser_signing = not no_browser_signing  # Invert for internal use
         
         # AWS Configuration
         self.region = region
@@ -110,8 +113,10 @@ class AgentCoreBrowser(BasePlaywrightComputer):
     def _initialize_aws_client(self):
         """Initialize AWS Bedrock AgentCore client."""
         try:
-            # Verify AWS credentials
-            boto3.client('sts').get_caller_identity()
+            # Verify AWS credentials and get account ID
+            sts_client = boto3.client('sts')
+            identity = sts_client.get_caller_identity()
+            self.account_id = identity['Account']
             
             # Create Bedrock AgentCore clients
             self.bedrock_agentcore_client = boto3.client(
@@ -124,7 +129,13 @@ class AgentCoreBrowser(BasePlaywrightComputer):
                 region_name=self.region
             )
             
+            # Create IAM client for role management
+            self.iam_client = boto3.client('iam')
+            
             print(f"✓ AWS Bedrock AgentCore client initialized in region: {self.region}")
+            
+            # Always call to handle execution role (creates/gets/uses existing)
+            self.execution_role_arn = self._create_or_get_execution_role()
             
         except NoCredentialsError:
             print("\n⚠️  AWS Credentials NOT found. Please configure AWS credentials.")
@@ -142,6 +153,184 @@ class AgentCoreBrowser(BasePlaywrightComputer):
             print(f"Error initializing AWS client: {e}")
             print("Please ensure AWS credentials are properly configured.")
             raise
+    
+    def _create_or_get_execution_role(self) -> str:
+        """
+        Create or get an IAM execution role for AgentCore Browser.
+        Uses deterministic naming based on features, or returns provided ARN.
+        
+        Returns:
+            str: Role ARN (provided, found, or created)
+        """
+        # If role ARN already provided, use it
+        if self.execution_role_arn:
+            print(f"Using provided execution role: {self.execution_role_arn}")
+            return self.execution_role_arn
+        
+        # If no features require a role, return None
+        if not self.enable_recording and not self.browser_signing:
+            return None
+        
+        import hashlib
+        
+        # Generate deterministic role name based on features
+        features = []
+        if self.enable_recording:
+            features.append(f"rec-{self.recording_s3_bucket}")
+        if self.browser_signing:
+            features.append("signing")
+        
+        config_str = "-".join(features)
+        config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
+        
+        role_name = f"AgentCoreBrowserRole-{config_hash}"
+        
+        try:
+            # Try to get existing role
+            response = self.iam_client.get_role(RoleName=role_name)
+            role_arn = response['Role']['Arn']
+            print(f"♻️  Found existing execution role: {role_name}")
+            return role_arn
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchEntity':
+                # Role doesn't exist, create it
+                print(f"Creating execution role: {role_name}...")
+                return self._create_execution_role(role_name)
+            else:
+                raise
+    
+    def _create_execution_role(self, role_name: str) -> str:
+        """
+        Create an IAM execution role with appropriate permissions.
+        
+        Args:
+            role_name: Name for the role
+            
+        Returns:
+            str: Role ARN
+        """
+        import json
+        
+        # Trust policy for AgentCore Browser
+        trust_policy = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "bedrock-agentcore.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {
+                        "aws:SourceAccount": self.account_id
+                    },
+                    "ArnLike": {
+                        "aws:SourceArn": f"arn:aws:bedrock-agentcore:{self.region}:{self.account_id}:*"
+                    }
+                }
+            }]
+        }
+        
+        # Create role
+        response = self.iam_client.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(trust_policy),
+            Description=f"Auto-created execution role for AgentCore Browser",
+            Tags=[
+                {'Key': 'CreatedBy', 'Value': 'AgentCoreBrowser'},
+                {'Key': 'Purpose', 'Value': 'BrowserAutomation'}
+            ]
+        )
+        
+        role_arn = response['Role']['Arn']
+        print(f"✓ Created execution role: {role_name}")
+        
+        # Attach permissions policy
+        policy_name = f"{role_name}-Policy"
+        self._create_and_attach_policy(role_name, policy_name)
+        
+        # Wait a bit for IAM to propagate
+        import time
+        print("⏳ Waiting for IAM role to propagate...")
+        time.sleep(10)
+        
+        return role_arn
+    
+    def _create_and_attach_policy(self, role_name: str, policy_name: str):
+        """
+        Create and attach permissions policy to the role.
+        
+        Args:
+            role_name: Name of the role
+            policy_name: Name for the policy
+        """
+        import json
+        
+        # Build policy based on features
+        policy_statements = [
+            {
+                "Sid": "BrowserPermissions",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:ConnectBrowserAutomationStream",
+                    "bedrock-agentcore:ListBrowsers",
+                    "bedrock-agentcore:GetBrowserSession",
+                    "bedrock-agentcore:ListBrowserSessions",
+                    "bedrock-agentcore:CreateBrowser",
+                    "bedrock-agentcore:StartBrowserSession",
+                    "bedrock-agentcore:StopBrowserSession",
+                    "bedrock-agentcore:ConnectBrowserLiveViewStream",
+                    "bedrock-agentcore:UpdateBrowserStream",
+                    "bedrock-agentcore:DeleteBrowser",
+                    "bedrock-agentcore:GetBrowser"
+                ],
+                "Resource": "*"
+            },
+            {
+                "Sid": "CloudWatchLogsPermissions",
+                "Effect": "Allow",
+                "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogStreams"
+                ],
+                "Resource": "*"
+            }
+        ]
+        
+        # Add S3 permissions if recording is enabled
+        if self.enable_recording:
+            policy_statements.append({
+                "Sid": "S3Permissions",
+                "Effect": "Allow",
+                "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject",
+                    "s3:ListBucket",
+                    "s3:ListMultipartUploadParts",
+                    "s3:AbortMultipartUpload"
+                ],
+                "Resource": [
+                    f"arn:aws:s3:::{self.recording_s3_bucket}",
+                    f"arn:aws:s3:::{self.recording_s3_bucket}/*"
+                ]
+            })
+        
+        policy_document = {
+            "Version": "2012-10-17",
+            "Statement": policy_statements
+        }
+        
+        # Create inline policy
+        self.iam_client.put_role_policy(
+            RoleName=role_name,
+            PolicyName=policy_name,
+            PolicyDocument=json.dumps(policy_document)
+        )
+        
+        print(f"✓ Attached permissions policy: {policy_name}")
 
     def _generate_browser_name(self) -> str:
         """
