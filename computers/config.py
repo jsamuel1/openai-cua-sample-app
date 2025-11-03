@@ -9,3 +9,16 @@ computers_config = {
     "scrapybara-ubuntu": ScrapybaraUbuntu,
     "agentcore-browser": AgentCoreBrowser,
 }
+
+# Mapping of CLI argument names to computer class parameter names
+# This allows CLI args to be namespaced (e.g., agentcore_region) while
+# class parameters remain clean (e.g., region)
+computers_arg_mapping = {
+    "agentcore-browser": {
+        "agentcore_region": "region",
+        "no_browser_signing": "no_browser_signing",
+        "recording_s3_bucket": "recording_s3_bucket",
+        "recording_s3_prefix": "recording_s3_prefix",
+    },
+    # Add mappings for other computers as needed
+}

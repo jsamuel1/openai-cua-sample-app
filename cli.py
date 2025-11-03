@@ -2,7 +2,7 @@ import argparse
 from agent.agent import Agent
 from computers.config import *
 from computers.default import *
-from computers import computers_config
+from computers import computers_config, computers_arg_mapping
 
 
 def acknowledge_safety_check_callback(message: str) -> bool:
@@ -78,16 +78,15 @@ def main():
     args = parser.parse_args()
     ComputerClass = computers_config[args.computer]
 
-    # Prepare computer-specific kwargs
+    # Prepare computer-specific kwargs using mapping from config
     computer_kwargs = {}
     
-    if args.computer == "agentcore-browser":
-        # Parameter names match AgentCoreBrowser.__init__ for direct passing
+    if args.computer in computers_arg_mapping:
+        # Map CLI arg names to class parameter names
+        arg_mapping = computers_arg_mapping[args.computer]
         computer_kwargs = {
-            "region": args.agentcore_region,
-            "no_browser_signing": args.no_browser_signing,
-            "recording_s3_bucket": args.recording_s3_bucket,
-            "recording_s3_prefix": args.recording_s3_prefix,
+            param_name: getattr(args, arg_name)
+            for arg_name, param_name in arg_mapping.items()
         }
 
     with ComputerClass(**computer_kwargs) as computer:

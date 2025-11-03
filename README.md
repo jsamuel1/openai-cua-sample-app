@@ -152,53 +152,120 @@ To use these, you will need to set up an account with the service by following t
 
 ### Amazon Bedrock AgentCore Browser Setup
 
-To use the `AgentCoreBrowser`, you need to configure AWS credentials with access to Amazon Bedrock AgentCore services.
+[Amazon Bedrock AgentCore Browser](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser.html) provides a fully managed, cloud-based browser for AI agents with built-in CAPTCHA reduction through Web Bot Auth.
 
 #### Prerequisites
 
-1. **AWS Account**: You need an active AWS account with access to Amazon Bedrock AgentCore services
-2. **AWS Credentials**: Configure your AWS credentials using one of these methods:
+1. **AWS Account** with access to Amazon Bedrock AgentCore services
+2. **AWS Credentials** configured using one of these methods:
 
 **Option 1: Environment Variables**
 
 Add to your `.env` file:
-```
+```bash
 AWS_ACCESS_KEY_ID=your_access_key_id
 AWS_SECRET_ACCESS_KEY=your_secret_access_key
-AWS_SESSION_TOKEN=your_session_token  # Optional, if using temporary credentials
+AWS_SESSION_TOKEN=your_session_token  # Optional, for temporary credentials
 ```
 
 **Option 2: AWS CLI Configuration**
 
-Configure credentials using AWS CLI:
-```shell
+```bash
 aws configure
 ```
 
-This will create credentials in `~/.aws/credentials` that will be automatically used.
+This creates credentials in `~/.aws/credentials` that are automatically used.
 
-#### Usage
+#### Basic Usage
 
-Run the sample app with the AgentCore Browser:
+Run with default settings (Web Bot Auth enabled, auto-created IAM role):
 
-```shell
-python cli.py --show --computer agentcore-browser
+```bash
+python cli.py --computer agentcore-browser
 ```
 
-You can also customize the browser configuration:
-- Default region: `us-east-1`
-- Default viewport: 1024x768
-- Virtual mouse cursor: enabled by default
+**What you get:**
+- ✅ Web Bot Auth enabled (reduces CAPTCHAs)
+- ✅ Auto-created IAM execution role
+- ✅ Browser reuse across runs
+- ✅ Virtual mouse cursor
 
-#### Features
+#### Usage with Session Recording
 
-- **Fully Managed**: AWS handles browser infrastructure, scaling, and maintenance
-- **CDP Connection**: Uses Chrome DevTools Protocol for low-level browser control
-- **Virtual Mouse**: Visual cursor indicator for better debugging
+Enable session recording to S3 for debugging and compliance:
+
+```bash
+# 1. Create S3 bucket (one-time setup)
+aws s3 mb s3://my-browser-recordings
+
+# 2. Run with recording enabled
+python cli.py --computer agentcore-browser \
+  --recording-s3-bucket my-browser-recordings
+```
+
+**What you get:**
+- ✅ All features from basic usage
+- ✅ Session recordings saved to S3
+- ✅ Auto-created IAM role with S3 permissions
+- ✅ View recordings in AWS Console
+
+**View recordings:**
+1. Go to [AgentCore Browser Console](https://console.aws.amazon.com/bedrock-agentcore/builtInTools)
+2. Select your browser
+3. Click "View Recording" for any completed session
+
+#### Advanced Configuration
+
+**Different AWS Region:**
+```bash
+python cli.py --computer agentcore-browser --region us-west-2
+```
+
+**Disable Web Bot Auth** (not recommended):
+```bash
+python cli.py --computer agentcore-browser --no-browser-signing
+```
+
+**Custom IAM Role** (via environment variable):
+```bash
+export AGENTCORE_BROWSER_EXECUTIONROLE_ARN="arn:aws:iam::123456789012:role/MyRole"
+python cli.py --computer agentcore-browser
+```
+
+#### Key Features
+
+- **Web Bot Auth (Preview)**: Cryptographic identity verification reduces CAPTCHAs on sites protected by Cloudflare, HUMAN Security, and Akamai Technologies
+- **Auto-Created IAM Roles**: No manual IAM setup required - roles are created automatically with proper permissions
+- **Session Recording**: Record all browser interactions to S3 for replay and debugging
+- **Browser Reuse**: Browsers are automatically reused across runs for faster startup
+- **Live View**: Watch browser sessions in real-time via AWS Console
+- **Fully Managed**: AWS handles infrastructure, scaling, and maintenance
 - **Secure**: AWS-managed authentication and encrypted connections
-- **Scalable**: Automatically handles resource allocation and cleanup
 
-For more information, visit the [Amazon Bedrock AgentCore documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser.html).
+#### How It Works
+
+1. **First Run**: Creates browser with deterministic name based on configuration
+2. **Subsequent Runs**: Reuses existing browser (faster startup)
+3. **IAM Roles**: Auto-created if not provided, reused across runs
+4. **Recording**: Sessions uploaded to S3 in chunks during execution
+
+#### Troubleshooting
+
+**"AWS Credentials NOT found"**
+- Solution: Run `aws configure` or set environment variables
+
+**"Access Denied" when creating IAM role**
+- Solution: Ensure your AWS credentials have IAM permissions (`iam:CreateRole`, `iam:PutRolePolicy`)
+- Alternative: Create role manually and set `AGENTCORE_BROWSER_EXECUTIONROLE_ARN`
+
+**Browser not being reused**
+- Solution: Ensure configuration is consistent across runs (same region, recording bucket, etc.)
+
+#### Learn More
+
+- [AgentCore Browser Documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser.html)
+- [Web Bot Auth Blog Post](https://aws.amazon.com/blogs/machine-learning/reduce-captchas-for-ai-agents-browsing-the-web-with-web-bot-auth-preview-in-amazon-bedrock-agentcore-browser/)
+- [AgentCore Quickstart](https://aws.github.io/bedrock-agentcore-starter-toolkit/user-guide/builtin-tools/quickstart-browser.md)
 
 
 ## Function Calling
