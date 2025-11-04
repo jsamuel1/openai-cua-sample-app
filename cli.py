@@ -55,6 +55,13 @@ def main():
         dest="agentcore_region",
     )
     parser.add_argument(
+        "--execution-role-arn",
+        type=str,
+        help="IAM role ARN for AgentCore Browser execution (required for recording/signing). Only used with agentcore-browser.",
+        default=None,
+        dest="execution_role_arn",
+    )
+    parser.add_argument(
         "--recording-s3-bucket",
         type=str,
         help="S3 bucket name for AgentCore Browser session recordings. Only used with agentcore-browser.",

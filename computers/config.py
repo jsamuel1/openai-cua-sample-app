@@ -16,9 +16,10 @@ computers_config = {
 computers_arg_mapping = {
     "agentcore-browser": {
         "agentcore_region": "region",
-        "no_browser_signing": "no_browser_signing",
+        "execution_role_arn": "execution_role_arn",
         "recording_s3_bucket": "recording_s3_bucket",
         "recording_s3_prefix": "recording_s3_prefix",
+        "no_browser_signing": "no_browser_signing",
     },
     # Add mappings for other computers as needed
 }

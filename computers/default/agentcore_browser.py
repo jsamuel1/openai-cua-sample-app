@@ -3,8 +3,7 @@ from typing import Tuple
 from playwright.sync_api import Browser, Page, Error as PlaywrightError
 from ..shared.base_playwright import BasePlaywrightComputer
 from dotenv import load_dotenv
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+from bedrock_agentcore.tools.browser_client import browser_session
 
 load_dotenv()
 
@@ -50,128 +49,54 @@ class AgentCoreBrowser(BasePlaywrightComputer):
 
     def get_dimensions(self):
         return self.dimensions
-
-    def __init__(
-        self,
-        width: int = 1024,
-        height: int = 768,
-        region: str = "us-east-1",
-        virtual_mouse: bool = True,
-        browser_identifier: str = None,
-        execution_role_arn: str = None,
-        recording_s3_bucket: str = None,
-        recording_s3_prefix: str = "browser-recordings",
-        no_browser_signing: bool = False,
-        reuse_browser: bool = True,
-    ):
-        """
-        Initialize the Amazon Bedrock AgentCore Browser instance.
-
-        Args:
-            width (int): The width of the browser viewport. Default is 1024.
-            height (int): The height of the browser viewport. Default is 768.
-            region (str): The AWS region for the AgentCore Browser service. Default is "us-east-1".
-            virtual_mouse (bool): Whether to enable the virtual mouse cursor. Default is True.
-            browser_identifier (str): Optional browser identifier to reuse an existing browser. If not provided, uses the default AgentCore browser.
-            execution_role_arn (str): Optional IAM role ARN for browser execution. If not provided and recording/signing is enabled, a role will be auto-created. Example: "arn:aws:iam::123456789012:role/AgentCoreBrowserRole"
-            recording_s3_bucket (str): S3 bucket name for session recordings. Enables recording when provided.
-            recording_s3_prefix (str): S3 prefix for recordings. Default is "browser-recordings".
-            no_browser_signing (bool): Disable Web Bot Auth signing (enabled by default to reduce CAPTCHAs). Default is False.
-            reuse_browser (bool): Whether to reuse existing browsers with matching configuration. Default is True.
-        """
-        super().__init__()
+    
+    def _generate_browser_name(self) -> str:
+        """Generate a deterministic browser name based on configuration."""
+        import hashlib
         
-        # Browser Configuration
-        self.dimensions = (width, height)
-        self.virtual_mouse = virtual_mouse
-        self.browser_identifier = browser_identifier
-        self.reuse_browser = reuse_browser
+        features = []
+        if self.enable_recording:
+            features.append(f"rec_{self.recording_s3_bucket}_{self.recording_s3_prefix}")
+        if self.browser_signing:
+            features.append("signing")
         
-        # Recording Configuration
-        # Check environment variable if execution_role_arn not provided
-        self.execution_role_arn = execution_role_arn or os.getenv("AGENTCORE_BROWSER_EXECUTIONROLE_ARN")
-        self.recording_s3_bucket = recording_s3_bucket
-        self.recording_s3_prefix = recording_s3_prefix
-        self.enable_recording = bool(recording_s3_bucket)  # Role will be auto-created if needed
+        config_str = f"{'_'.join(features)}_{self.execution_role_arn}"
+        config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:12]
         
-        # Web Bot Auth Configuration
-        self.browser_signing = not no_browser_signing  # Invert for internal use
+        feature_names = []
+        if self.enable_recording:
+            feature_names.append("Recording")
+        if self.browser_signing:
+            feature_names.append("Signing")
         
-        # AWS Configuration
-        self.region = region
-        
-        # Session tracking
-        self.browser_id = None
-        self.session_id = None
-        self.browser_created = False  # Track if we created the browser
-        
-        # Initialize AWS clients
-        self.bedrock_agentcore_client = None
-        self.bedrock_agentcore_control = None
-        self._initialize_aws_client()
-
-    def _initialize_aws_client(self):
-        """Initialize AWS Bedrock AgentCore client."""
+        return f"AgentCore_{'_'.join(feature_names)}_{config_hash}"
+    
+    def _find_existing_browser(self, browser_name: str) -> str:
+        """Find an existing browser by name."""
         try:
-            # Verify AWS credentials and get account ID
-            sts_client = boto3.client('sts')
-            identity = sts_client.get_caller_identity()
-            self.account_id = identity['Account']
+            response = self.bedrock_agentcore_control.list_browsers()
             
-            # Create Bedrock AgentCore clients
-            self.bedrock_agentcore_client = boto3.client(
-                'bedrock-agentcore',
-                region_name=self.region
-            )
-
-            self.bedrock_agentcore_control = boto3.client(
-                'bedrock-agentcore-control',
-                region_name=self.region
-            )
+            for browser in response.get('browserSummaries', []):
+                if browser.get('name') == browser_name:
+                    browser_id = browser.get('browserId')
+                    print(f"♻️  Found existing browser: {browser_name} ({browser_id})")
+                    return browser_id
             
-            # Create IAM client for role management
-            self.iam_client = boto3.client('iam')
-            
-            print(f"✓ AWS Bedrock AgentCore client initialized in region: {self.region}")
-            
-            # Always call to handle execution role (creates/gets/uses existing)
-            self.execution_role_arn = self._create_or_get_execution_role()
-            
-        except NoCredentialsError:
-            print("\n⚠️  AWS Credentials NOT found. Please configure AWS credentials.")
-            raise
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code")
-            if error_code == 'InvalidClientTokenId':
-                print("\n⚠️  AWS Credentials are NOT valid: The access key ID is invalid or does not exist.")
-            elif error_code == 'ExpiredToken':
-                print("\n⚠️  AWS Credentials are NOT valid: The security token is expired.")
-            else:
-                print(f"\n⚠️  AWS Credentials check failed: {e}")
-            raise
+            return None
         except Exception as e:
-            print(f"Error initializing AWS client: {e}")
-            print("Please ensure AWS credentials are properly configured.")
-            raise
+            print(f"Warning: Could not list browsers: {e}")
+            return None
     
     def _create_or_get_execution_role(self) -> str:
         """
         Create or get an IAM execution role for AgentCore Browser.
-        Uses deterministic naming based on features, or returns provided ARN.
+        Uses deterministic naming based on features.
         
         Returns:
-            str: Role ARN (provided, found, or created)
+            str: Role ARN
         """
-        # If role ARN already provided, use it
-        if self.execution_role_arn:
-            print(f"Using provided execution role: {self.execution_role_arn}")
-            return self.execution_role_arn
-        
-        # If no features require a role, return None
-        if not self.enable_recording and not self.browser_signing:
-            return None
-        
         import hashlib
+        from botocore.exceptions import ClientError
         
         # Generate deterministic role name based on features
         features = []
@@ -331,160 +256,238 @@ class AgentCoreBrowser(BasePlaywrightComputer):
         )
         
         print(f"✓ Attached permissions policy: {policy_name}")
-
-    def _generate_browser_name(self) -> str:
-        """
-        Generate a deterministic browser name based on configuration.
-        
-        Returns:
-            str: Deterministic browser name
-        """
-        import hashlib
-        
-        # Create a deterministic name based on features
-        features = []
-        if self.enable_recording:
-            features.append(f"rec-{self.recording_s3_bucket}-{self.recording_s3_prefix}")
-        if self.browser_signing:
-            features.append("signing")
-        
-        # Include execution role ARN in the hash for uniqueness
-        config_str = f"{'-'.join(features)}-{self.execution_role_arn}"
-        config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:12]
-        
-        # Create readable name
-        feature_names = []
-        if self.enable_recording:
-            feature_names.append("Recording")
-        if self.browser_signing:
-            feature_names.append("Signing")
-        
-        return f"AgentCore-{'-'.join(feature_names)}-{config_hash}"
     
-    def _find_existing_browser(self, browser_name: str) -> str:
+    def _ensure_custom_browser(self):
+        """Ensure a custom browser exists with the required features."""
+        
+        browser_name = self._generate_browser_name()
+        
+        # Try to find existing browser if reuse is enabled
+        if self.reuse_browser:
+            self.custom_browser_id = self._find_existing_browser(browser_name)
+        
+        # Create new browser if not found
+        if not self.custom_browser_id:
+            import uuid
+            
+            features = []
+            if self.enable_recording:
+                features.append("recording")
+            if self.browser_signing:
+                features.append("Web Bot Auth signing")
+            
+            print(f"Creating custom browser with {' and '.join(features)} enabled...")
+            
+            browser_params = {
+                'name': browser_name,
+                'description': f'Browser with {", ".join(features)}',
+                'networkConfiguration': {
+                    'networkMode': 'PUBLIC'
+                },
+                'executionRoleArn': self.execution_role_arn,
+                'clientToken': str(uuid.uuid4())
+            }
+            
+            if self.enable_recording:
+                browser_params['recording'] = {
+                    'enabled': True,
+                    's3Location': {
+                        'bucket': self.recording_s3_bucket,
+                        'prefix': self.recording_s3_prefix
+                    }
+                }
+            
+            if self.browser_signing:
+                browser_params['browserSigning'] = {
+                    'enabled': True
+                }
+            
+            browser_response = self.bedrock_agentcore_control.create_browser(**browser_params)
+            self.custom_browser_id = browser_response.get('browserId')
+            print(f"✓ Browser created: {browser_name} ({self.custom_browser_id})")
+            
+            # Wait for browser to become active
+            self._wait_for_browser_active(self.custom_browser_id)
+            
+            if self.enable_recording:
+                print(f"📹 Recordings will be stored at: s3://{self.recording_s3_bucket}/{self.recording_s3_prefix}/")
+            if self.browser_signing:
+                print(f"🔐 Web Bot Auth enabled - HTTP requests will be cryptographically signed")
+                print(f"   This helps reduce CAPTCHAs on sites protected by Cloudflare, HUMAN Security, and Akamai")
+        else:
+            # Verify existing browser is active
+            self._wait_for_browser_active(self.custom_browser_id)
+    
+    def _wait_for_browser_active(self, browser_id: str, max_wait: int = 60):
         """
-        Find an existing browser by name.
+        Wait for a browser to reach READY state.
         
         Args:
-            browser_name: The browser name to search for
-            
-        Returns:
-            str: Browser ID if found, None otherwise
+            browser_id: The browser ID to check
+            max_wait: Maximum seconds to wait (default 60)
         """
-        try:
-            # List browsers and find matching name
-            response = self.bedrock_agentcore_control.list_browsers()
-            
-            for browser in response.get('browsers', []):
-                if browser.get('name') == browser_name:
-                    browser_id = browser.get('browserId') or browser.get('browserIdentifier')
-                    print(f"♻️  Found existing browser: {browser_name} ({browser_id})")
-                    return browser_id
-            
-            return None
-        except Exception as e:
-            print(f"Warning: Could not list browsers: {e}")
-            return None
+        import time
+        
+        print(f"⏳ Waiting for browser {browser_id} to become ready...")
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            try:
+                response = self.bedrock_agentcore_control.get_browser(browserId=browser_id)
+                status = response.get('status')
+                
+                if status == 'READY':
+                    print(f"✓ Browser is ready")
+                    return
+                elif status in ['FAILED', 'DELETING', 'DELETED']:
+                    raise RuntimeError(f"Browser is in {status} state and cannot be used")
+                else:
+                    print(f"   Browser status: {status}...")
+                    time.sleep(5)
+            except Exception as e:
+                print(f"   Error checking browser status: {e}")
+                time.sleep(5)
+        
+        raise TimeoutError(f"Browser did not become ready within {max_wait} seconds")
+    
+    def _wait_for_session_ready(self, session_id: str, max_wait: int = 30):
+        """
+        Wait for a browser session to be fully ready for CDP connections.
+        
+        Args:
+            session_id: The session ID to check
+            max_wait: Maximum seconds to wait (default 30)
+        """
+        import time
+        import boto3
+        
+        print(f"⏳ Waiting for session {session_id} to be ready for connections...")
+        
+        # Initialize bedrock-agentcore client if not already done
+        if not hasattr(self, 'bedrock_agentcore_data'):
+            self.bedrock_agentcore_data = boto3.client(
+                'bedrock-agentcore',
+                region_name=self.region
+            )
+        
+        # Get the browser identifier
+        browser_id = self.browser_identifier or self.custom_browser_id or 'aws.browser.v1'
+        
+        start_time = time.time()
+        last_status = None
+        
+        while time.time() - start_time < max_wait:
+            try:
+                # Get session status
+                response = self.bedrock_agentcore_data.get_browser_session(
+                    browserIdentifier=browser_id,
+                    sessionId=session_id
+                )
+                status = response.get('status')
+                
+                if status != last_status:
+                    print(f"   Session status: {status}")
+                    last_status = status
+                
+                if status == 'READY':
+                    # Add a small additional delay to ensure automation endpoint is ready
+                    print(f"   Waiting for automation endpoint to initialize...")
+                    time.sleep(2)
+                    print(f"✓ Session is ready for CDP connection")
+                    return
+                elif status == 'TERMINATED':
+                    raise RuntimeError(f"Session was terminated before it could be used")
+                else:
+                    time.sleep(2)
+            except Exception as e:
+                # If we can't check status, wait a bit and try to connect anyway
+                if "get_browser_session" in str(e) or "Parameter validation" in str(e):
+                    print(f"   Note: Cannot verify session status ({e}), will attempt connection")
+                    time.sleep(5)
+                    return
+                else:
+                    raise
+        
+        # If we timeout, try to connect anyway
+        print(f"   Timeout waiting for session status, attempting connection...")
 
-    def _create_browser_session(self) -> dict:
+    def __init__(
+        self,
+        width: int = 1024,
+        height: int = 768,
+        region: str = "us-east-1",
+        virtual_mouse: bool = True,
+        browser_identifier: str = None,
+        execution_role_arn: str = None,
+        recording_s3_bucket: str = None,
+        recording_s3_prefix: str = "browser-recordings",
+        no_browser_signing: bool = False,
+        reuse_browser: bool = True,
+    ):
         """
-        Create a new browser session on Amazon Bedrock AgentCore.
+        Initialize the Amazon Bedrock AgentCore Browser instance.
 
-        Returns:
-            dict: Session information including browser_id, session_id, and WebSocket URL.
+        Args:
+            width (int): The width of the browser viewport. Default is 1024.
+            height (int): The height of the browser viewport. Default is 768.
+            region (str): The AWS region for the AgentCore Browser service. Default is "us-east-1".
+            virtual_mouse (bool): Whether to enable the virtual mouse cursor. Default is True.
+            browser_identifier (str): Optional browser identifier to reuse an existing browser. If not provided, uses the default AgentCore browser.
+            execution_role_arn (str): Optional IAM role ARN for browser execution. Required for recording/signing features.
+            recording_s3_bucket (str): S3 bucket name for session recordings. Enables recording when provided.
+            recording_s3_prefix (str): S3 prefix for recordings. Default is "browser-recordings".
+            no_browser_signing (bool): Disable Web Bot Auth signing (enabled by default to reduce CAPTCHAs). Default is False.
+            reuse_browser (bool): Whether to reuse existing browsers with matching configuration. Default is True.
         """
-        width, height = self.dimensions
+        super().__init__()
         
-        # Use existing browser or create a new one
-        if self.browser_identifier:
-            self.browser_id = self.browser_identifier
-            print(f"Using specified browser: {self.browser_id}")
-        elif self.enable_recording or self.browser_signing:
-            # Generate deterministic browser name
-            browser_name = self._generate_browser_name()
+        # Browser Configuration
+        self.dimensions = (width, height)
+        self.virtual_mouse = virtual_mouse
+        self.browser_identifier = browser_identifier
+        self.region = region
+        self.reuse_browser = reuse_browser
+        
+        # Recording Configuration
+        self.execution_role_arn = execution_role_arn or os.getenv("AGENTCORE_BROWSER_EXECUTIONROLE_ARN")
+        self.recording_s3_bucket = recording_s3_bucket
+        self.recording_s3_prefix = recording_s3_prefix
+        self.enable_recording = bool(recording_s3_bucket)
+        
+        # Web Bot Auth Configuration
+        self.browser_signing = not no_browser_signing
+        
+        # Session tracking
+        self.browser_session_client = None
+        self.custom_browser_id = None
+        
+        # Initialize AWS clients if we need to create custom browsers
+        if self.enable_recording or self.browser_signing:
+            import boto3
+            from botocore.exceptions import ClientError
             
-            # Try to find existing browser if reuse is enabled
-            if self.reuse_browser:
-                self.browser_id = self._find_existing_browser(browser_name)
+            # Get account ID for role creation
+            sts_client = boto3.client('sts')
+            identity = sts_client.get_caller_identity()
+            self.account_id = identity['Account']
             
-            # Create new browser if not found
-            if not self.browser_id:
-                import uuid
-                
-                features = []
-                if self.enable_recording:
-                    features.append("recording")
-                if self.browser_signing:
-                    features.append("Web Bot Auth signing")
-                
-                print(f"Creating custom browser with {' and '.join(features)} enabled...")
-                
-                browser_params = {
-                    'name': browser_name,
-                    'description': f'Browser with {", ".join(features)}',
-                    'networkConfiguration': {
-                        'networkMode': 'PUBLIC'
-                    },
-                    'executionRoleArn': self.execution_role_arn,
-                    'clientToken': str(uuid.uuid4())
-                }
-                
-                # Add recording configuration if enabled
-                if self.enable_recording:
-                    browser_params['recording'] = {
-                        'enabled': True,
-                        's3Location': {
-                            'bucket': self.recording_s3_bucket,
-                            'prefix': self.recording_s3_prefix
-                        }
-                    }
-                
-                # Add browser signing configuration if enabled
-                if self.browser_signing:
-                    browser_params['browserSigning'] = {
-                        'enabled': True
-                    }
-                
-                browser_response = self.bedrock_agentcore_control.create_browser(**browser_params)
-                self.browser_id = browser_response.get('browserId') or browser_response.get('browserIdentifier')
-                self.browser_created = True
-                print(f"✓ Browser created: {browser_name} ({self.browser_id})")
-                
-                if self.enable_recording:
-                    print(f"📹 Recordings will be stored at: s3://{self.recording_s3_bucket}/{self.recording_s3_prefix}/")
-                if self.browser_signing:
-                    print(f"🔐 Web Bot Auth enabled - HTTP requests will be cryptographically signed")
-                    print(f"   This helps reduce CAPTCHAs on sites protected by Cloudflare, HUMAN Security, and Akamai")
-        else:
-            # Use default AgentCore browser (no custom browser needed)
-            print("Using default AgentCore browser...")
-            self.browser_id = None
-        
-        # Start browser session
-        print("Starting browser session...")
-        session_params = {}
-        
-        if self.browser_id:
-            session_params['browserId'] = self.browser_id
-        
-        session_response = self.bedrock_agentcore_client.start_browser_session(**session_params)
-        
-        self.session_id = session_response['sessionId']
-        print(f"✓ Session started: {self.session_id}")
-        
-        # Get automation endpoint (CDP WebSocket URL with auth)
-        automation_params = {'sessionId': self.session_id}
-        if self.browser_id:
-            automation_params['browserId'] = self.browser_id
+            self.bedrock_agentcore_control = boto3.client(
+                'bedrock-agentcore-control',
+                region_name=self.region
+            )
+            self.iam_client = boto3.client('iam')
             
-        automation_response = self.bedrock_agentcore_client.get_automation_endpoint(**automation_params)
-        
-        return {
-            'browser_id': self.browser_id,
-            'session_id': self.session_id,
-            'ws_url': automation_response['webSocketUrl'],
-            'headers': automation_response.get('headers', {})
-        }
+            print(f"✓ AWS Bedrock AgentCore client initialized in region: {self.region}")
+            
+            # Create or get execution role if not provided
+            if not self.execution_role_arn:
+                self.execution_role_arn = self._create_or_get_execution_role()
+            
+            # Ensure we have or create a custom browser
+            self._ensure_custom_browser()
+
+
+
 
     def _get_browser_and_page(self) -> Tuple[Browser, Page]:
         """
@@ -493,20 +496,62 @@ class AgentCoreBrowser(BasePlaywrightComputer):
         Returns:
             Tuple[Browser, Page]: A tuple containing the connected browser and page objects.
         """
-        # Create browser session
-        session_info = self._create_browser_session()
+        print(f"✓ Initializing AgentCore Browser in region: {self.region}")
         
-        print(f"\nConnecting to AgentCore Browser via CDP...")
-        
-        # Connect to the remote browser session using CDP
-        connect_options = {'timeout': 60000}
-        if session_info.get('headers'):
-            connect_options['headers'] = session_info['headers']
-        
-        browser = self._playwright.chromium.connect_over_cdp(
-            session_info['ws_url'], 
-            **connect_options
-        )
+        try:
+            # Import BrowserClient directly for manual session management
+            from bedrock_agentcore.tools.browser_client import BrowserClient
+            
+            # Determine browser identifier
+            identifier = self.browser_identifier or self.custom_browser_id or 'aws.browser.v1'
+            
+            if identifier != 'aws.browser.v1':
+                print(f"Using custom browser: {identifier}")
+            
+            # Create browser client and start session with identifier
+            client = BrowserClient(region=self.region)
+            
+            # Start session with identifier and viewport
+            viewport = {'width': self.dimensions[0], 'height': self.dimensions[1]}
+            session_id = client.start(
+                identifier=identifier,
+                viewport=viewport
+            )
+            
+            # Store client for cleanup
+            self.browser_session_client = client
+            
+            # Verify the session was created successfully
+            if not hasattr(client, 'session_id') or not client.session_id:
+                raise RuntimeError("Browser session was not created successfully - no session ID returned")
+            
+            print(f"✓ Browser session created: {client.session_id}")
+            
+            # Wait for session to be ready
+            self._wait_for_session_ready(client.session_id)
+            
+            # Get WebSocket URL and authentication headers
+            ws_url, headers = client.generate_ws_headers()
+            
+            print(f"Connecting to AgentCore Browser via CDP...")
+            print(f"WebSocket URL: {ws_url}")
+            
+            # Connect to the remote browser session using CDP with auth headers
+            browser = self._playwright.chromium.connect_over_cdp(
+                ws_url,
+                headers=headers,
+                timeout=60000
+            )
+        except Exception as e:
+            print(f"\n❌ Failed to create or connect to AgentCore Browser session:")
+            print(f"   Error: {e}")
+            print(f"\nTroubleshooting tips:")
+            print(f"   1. Verify your AWS credentials are configured correctly")
+            print(f"   2. Ensure you have permissions for bedrock-agentcore:StartBrowserSession")
+            print(f"   3. Check that the region '{self.region}' supports AgentCore Browser")
+            if self.custom_browser_id:
+                print(f"   4. Verify the custom browser '{self.custom_browser_id}' exists and is in READY state")
+            raise
         
         # Get the default context and page
         context = browser.contexts[0]
@@ -591,49 +636,7 @@ class AgentCoreBrowser(BasePlaywrightComputer):
                 print("Warning: All pages have been closed.")
                 self._page = None
 
-    def list_browsers(self) -> list:
-        """
-        List all custom browsers in the account.
-        
-        Returns:
-            list: List of browser dictionaries with name, id, and status
-        """
-        try:
-            response = self.bedrock_agentcore_control.list_browsers()
-            browsers = []
-            
-            for browser in response.get('browsers', []):
-                browsers.append({
-                    'name': browser.get('name'),
-                    'id': browser.get('browserId') or browser.get('browserIdentifier'),
-                    'status': browser.get('status'),
-                    'created': browser.get('createdAt')
-                })
-            
-            return browsers
-        except Exception as e:
-            print(f"Error listing browsers: {e}")
-            return []
-    
-    def delete_browser_by_id(self, browser_id: str) -> bool:
-        """
-        Delete a specific browser by ID.
-        
-        Args:
-            browser_id: The browser identifier to delete
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            self.bedrock_agentcore_control.delete_browser(
-                browserIdentifier=browser_id
-            )
-            print(f"✓ Browser {browser_id} deleted")
-            return True
-        except Exception as e:
-            print(f"Error deleting browser {browser_id}: {e}")
-            return False
+
 
     def screenshot(self) -> str:
         """
@@ -686,40 +689,13 @@ class AgentCoreBrowser(BasePlaywrightComputer):
             except Exception as e:
                 print(f"Error stopping playwright: {e}")
 
-        # Clean up AgentCore session
-        if self.bedrock_agentcore_client and self.session_id:
+        # Clean up AgentCore browser session using the SDK client
+        if self.browser_session_client:
             try:
                 print(f"\nCleaning up AgentCore Browser session...")
-                
-                # Stop browser session
-                stop_params = {'sessionId': self.session_id}
-                if self.browser_id:
-                    stop_params['browserId'] = self.browser_id
-                
-                self.bedrock_agentcore_client.stop_browser_session(**stop_params)
-                print(f"✓ Session {self.session_id} stopped")
-                
-                # If recording was enabled, show where to find it
-                if self.enable_recording:
-                    print(f"📹 Session recording available at: s3://{self.recording_s3_bucket}/{self.recording_s3_prefix}/")
-                    print(f"   View in AWS Console: https://{self.region}.console.aws.amazon.com/bedrock-agentcore/builtInTools")
-                
+                self.browser_session_client.stop()
+                print("✓ AgentCore Browser session stopped")
             except Exception as e:
                 print(f"Warning: Could not stop browser session: {e}")
-        
-        # Note: Browsers are NEVER deleted automatically to enable reuse across runs
-        # This is intentional behavior for the reuse_browser feature
-        # Benefits:
-        #   - Faster startup on subsequent runs (no browser creation overhead)
-        #   - Consistent configuration across application restarts
-        #   - Reduced API calls to control plane
-        # 
-        # To manually delete browsers:
-        #   - Use browser.list_browsers() and browser.delete_browser_by_id()
-        #   - Or use AWS Console: bedrock-agentcore/builtInTools
-        #   - Or use AWS CLI: aws bedrock-agentcore-control delete-browser
-        
-        if self.browser_id and (self.enable_recording or self.browser_signing):
-            print(f"ℹ️  Browser {self.browser_id} will be reused in future runs")
         
         print("✓ AgentCore Browser cleanup complete")
