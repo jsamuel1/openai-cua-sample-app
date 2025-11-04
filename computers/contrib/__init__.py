@@ -1,4 +1,6 @@
 # Contributed computers
 # Add your contributed computer implementations here
 
-__all__ = []
+from .agentcore_browser import AgentCoreBrowser
+
+__all__ = ["AgentCoreBrowser"]
